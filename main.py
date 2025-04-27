@@ -23,17 +23,26 @@ st.set_page_config(
 def init_supabase():
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    client = create_client(SUPABASE_URL, SUPABASE_KEY)
     
     try:
-        # Just verify we can access storage
-        client.storage.get_bucket("analytics-uploads")
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        
+        # Test authentication capabilities
+        try:
+            client.auth.get_user()
+        except Exception as auth_error:
+            st.error(f"Auth test failed: {str(auth_error)}")
+            return None
+            
+        return client
     except Exception as e:
-        st.error(f"Storage access error: {str(e)}")
-        st.warning("Please create the 'analytics-uploads' bucket in Supabase Storage")
+        st.error(f"Supabase initialization failed: {str(e)}")
         return None
-    
-    return client
+
+supabase = init_supabase()
+if supabase is None:
+    st.error("Failed to initialize Supabase client. Check your credentials.")
+    st.stop()  # Prevent the app from running without Supabase
 
 supabase = init_supabase()
 openai.api_key = st.secrets["OPENAI_API_KEY"]
@@ -41,18 +50,27 @@ openai.api_key = st.secrets["OPENAI_API_KEY"]
 ## --------------------------
 ## AUTHENTICATION FUNCTIONS
 ## --------------------------
-
 def login(email: str, password: str) -> bool:
+    if supabase is None:
+        st.error("Supabase client not initialized")
+        return False
+        
     try:
-        response = supabase.auth.sign_in_with_password({"email": email, "password": password})
-        if not response.user:
-            st.error("Login failed")
-            return False
-        return True
+        response = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+        
+        if hasattr(response, 'user') and response.user:
+            st.session_state.user = response
+            return True
+            
+        st.error("Login failed - no user returned")
+        return False
     except Exception as e:
         st.error(f"Login error: {str(e)}")
         return False
-
+        
 def sign_up(email: str, password: str, full_name: str) -> bool:
     try:
         response = supabase.auth.sign_up({"email": email, "password": password})
