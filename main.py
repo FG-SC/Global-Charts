@@ -9,6 +9,13 @@ from typing import Optional
 from supabase import create_client, Client
 import openai
 
+
+st.set_page_config(
+    page_title="Social Media Analytics",
+    page_icon="📊",
+    layout="wide"
+)
+
 # Initialize Supabase client
 @st.cache_resource
 def init_supabase():
@@ -436,12 +443,6 @@ def main_app():
 ## --------------------------
 
 def app():
-    st.set_page_config(
-        page_title="Social Media Analytics",
-        page_icon="📊",
-        layout="wide"
-    )
-    
     if not check_auth():
         show_auth()
     else:
