@@ -26,10 +26,10 @@ def init_supabase():
     
     # Ensure the storage bucket exists
     try:
-        client.storage.get_bucket("analytics_uploads")
+        client.storage.get_bucket("analytics-uploads")
     except Exception as e:
         if "Bucket not found" in str(e):
-            client.storage.create_bucket("analytics_uploads", public=True)
+            client.storage.create_bucket("analytics-uploads", public=True)
     return client
 
 supabase = init_supabase()
