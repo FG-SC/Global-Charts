@@ -255,11 +255,10 @@ def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> D
             
         file_name = f"{user_id}/{account_id}/{uuid.uuid4()}{file_ext}"
         
-        # Upload to Supabase
+        # Upload to Supabase - Modified version without content_type
         res = supabase.storage.from_("analytics-uploads").upload(
             file_name, 
-            file.read(),
-            content_type='text/csv' if file_ext == '.csv' else 'application/vnd.ms-excel'
+            file.read()
         )
         
         if res:
@@ -278,7 +277,6 @@ def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> D
         return {"success": False, "message": "Failed to upload file to storage"}
     except Exception as e:
         return {"success": False, "message": f"Error saving file: {str(e)}"}
-
 def get_user_accounts(user_id: str) -> List[Dict]:
     try:
         return supabase.table("social_accounts").select("*").eq("user_id", user_id).execute().data
