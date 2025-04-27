@@ -290,15 +290,23 @@ def get_account_uploads(user_id: str, account_id: int) -> List[Dict]:
     except Exception as e:
         st.error(f"Error loading uploads: {str(e)}")
         return []
-
 def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
     try:
+        # Add bucket name explicitly
         res = supabase.storage.from_("analytics-uploads").download(file_path)
-        return pd.read_csv(StringIO(res.decode('utf-8')))
+        
+        # Handle both CSV and JSON
+        if file_path.endswith('.csv'):
+            return pd.read_csv(StringIO(res.decode('utf-8')))
+        elif file_path.endswith('.json'):
+            return pd.read_json(StringIO(res.decode('utf-8')))
+        else:
+            st.error("Unsupported file format")
+            return None
+            
     except Exception as e:
-        st.error(f"Error loading file: {str(e)}")
+        st.error(f"Error loading {file_path}: {str(e)}")
         return None
-
 ## --------------------------
 ## ANALYSIS FUNCTIONS
 ## --------------------------
@@ -597,11 +605,13 @@ def main_app():
                                 
                                 if result["success"]:
                                     st.success(result["message"])
-                                    
+                                    st.write("File path:", f"{user_id}/{account['id']}/{uploaded_file.name}")  # Debug path
                                     # Perform analysis based on file type
                                     df = get_upload_data(f"{user_id}/{account['id']}/{uploaded_file.name}")
                                     
                                     if df is not None:
+                                        st.write("Data loaded successfully. Sample:", df.head(2))  # Verify data
+                                        
                                         st.subheader("Analysis Results")
                                         if detected_type == "twitter_account_overview":
                                             twitter_account_analysis(df)
