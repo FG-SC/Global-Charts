@@ -17,6 +17,7 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
+
 # Initialize Supabase client with bucket creation
 @st.cache_resource
 def init_supabase():
@@ -24,25 +25,12 @@ def init_supabase():
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     client = create_client(SUPABASE_URL, SUPABASE_KEY)
     
-    # Check if bucket exists and create if needed
     try:
-        existing_buckets = client.storage.list_buckets()
-        bucket_names = [bucket.name for bucket in existing_buckets]
-        
-        if "analytics-uploads" not in bucket_names:
-            try:
-                client.storage.create_bucket(
-                    "analytics-uploads",
-                    public=True,
-                    allowed_mime_types=['text/csv', 'application/vnd.ms-excel'],
-                    file_size_limit=1024 * 1024 * 5  # 5MB limit
-                )
-                st.success("Created analytics-uploads bucket")
-            except Exception as create_error:
-                st.error(f"Bucket creation error: {str(create_error)}")
-                return None
-    except Exception as list_error:
-        st.error(f"Bucket listing error: {str(list_error)}")
+        # Just verify we can access storage
+        client.storage.get_bucket("analytics-uploads")
+    except Exception as e:
+        st.error(f"Storage access error: {str(e)}")
+        st.warning("Please create the 'analytics-uploads' bucket in Supabase Storage")
         return None
     
     return client
