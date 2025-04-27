@@ -1,1 +1,3 @@
 plotly
+supabase
+openai
