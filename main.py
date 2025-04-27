@@ -9,16 +9,9 @@ from typing import Optional
 from supabase import create_client, Client
 import openai
 
-st.set_page_config(
-    page_title="Social Media Analytics",
-    page_icon="📊",
-    layout="wide"
-)
-
 # Initialize Supabase client
 @st.cache_resource
 def init_supabase():
-  
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
     return create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -98,7 +91,7 @@ def show_auth():
 ## DATA MANAGEMENT FUNCTIONS
 ## --------------------------
 
-def save_uploaded_file(user_id: str, account_id: int, data_type: str, file, campaign_type: str = "organic"):
+def save_uploaded_file(user_id: str, account_id: int, data_type: str, file):
     try:
         file_ext = os.path.splitext(file.name)[1]
         file_name = f"{user_id}/{account_id}/{uuid.uuid4()}{file_ext}"
@@ -111,8 +104,7 @@ def save_uploaded_file(user_id: str, account_id: int, data_type: str, file, camp
                 "account_id": account_id,
                 "data_type": data_type,
                 "file_name": file.name,
-                "file_path": file_name,
-                "campaign_type": campaign_type
+                "file_path": file_name
             }).execute()
             return True
         return False
@@ -191,6 +183,20 @@ def instagram_stories_analysis(df):
                     trendline="lowess", title='Duration vs Engagement')
     st.plotly_chart(fig, use_container_width=True)
 
+    # AI Summary
+    if st.button("Generate AI Insights for Stories"):
+        summary_text = f"""
+        Instagram Stories Performance Summary:
+        - Total Stories: {len(df)}
+        - Average Reach: {df['Reach'].mean():,.0f}
+        - Average Engagement Rate: {df['Engagement Rate'].mean():.2f}%
+        - Best Performing Story Reach: {df['Reach'].max():,.0f}
+        """
+        summary = generate_summary(summary_text, "Instagram Stories")
+        if summary:
+            st.subheader("AI-Powered Insights")
+            st.markdown(summary)
+
 def instagram_posts_analysis(df):
     st.header("Instagram Posts Analysis")
     
@@ -215,34 +221,74 @@ def instagram_posts_analysis(df):
                     barmode='group', title='Performance by Post Type')
         st.plotly_chart(fig, use_container_width=True)
 
-def twitter_analysis(tweets):
+    # AI Summary
+    if st.button("Generate AI Insights for Posts"):
+        summary_text = f"""
+        Instagram Posts Performance Summary:
+        - Total Posts: {len(df)}
+        - Average Reach: {df['Reach'].mean():,.0f}
+        - Average Engagement Rate: {df['Engagement Rate'].mean():.2f}%
+        - Best Performing Post Reach: {df['Reach'].max():,.0f}
+        """
+        if 'Post type' in df.columns:
+            summary_text += f"\nPost Type Distribution:\n{df['Post type'].value_counts().to_string()}"
+        
+        summary = generate_summary(summary_text, "Instagram Posts")
+        if summary:
+            st.subheader("AI-Powered Insights")
+            st.markdown(summary)
+
+def twitter_analysis(df):
     st.header("Twitter Analytics")
     
     # Calculate metrics
-    tweets['engagement_rate'] = tweets['Engagements']/tweets['Impressions']
-    mean_engagement_rate = tweets['engagement_rate'].mean()
+    if 'Engagements' in df.columns and 'Impressions' in df.columns:
+        df['engagement_rate'] = df['Engagements']/df['Impressions']
+        mean_engagement_rate = df['engagement_rate'].mean()
     
     # Display metrics
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Tweets", len(tweets))
-    col2.metric("Avg. Engagement Rate", f"{mean_engagement_rate:.2%}")
-    col3.metric("Avg. Likes", f"{tweets['Likes'].mean():,.0f}")
+    col1.metric("Total Tweets", len(df))
+    if 'engagement_rate' in df.columns:
+        col2.metric("Avg. Engagement Rate", f"{mean_engagement_rate:.2%}")
+    if 'Likes' in df.columns:
+        col3.metric("Avg. Likes", f"{df['Likes'].mean():,.0f}")
     
     # Visualizations
-    fig = go.Figure()
-    metrics = ['Likes', 'Reposts', 'Replies', 'Bookmarks']
-    colors = ['#FF006E', '#8338EC', '#3A86FF', '#FFBE0B']
-    
-    for metric, color in zip(metrics, colors):
-        fig.add_trace(go.Scatter(
-            x=tweets['Date'], 
-            y=tweets[metric],
-            name=metric,
-            line=dict(color=color)
-        ))
-    
-    fig.update_layout(title="Engagement Metrics Over Time")
-    st.plotly_chart(fig, use_container_width=True)
+    if 'Date' in df.columns:
+        fig = go.Figure()
+        metrics = []
+        colors = ['#FF006E', '#8338EC', '#3A86FF', '#FFBE0B']
+        
+        # Add available metrics to the plot
+        for metric in ['Likes', 'Reposts', 'Replies', 'Bookmarks']:
+            if metric in df.columns:
+                metrics.append(metric)
+        
+        for metric, color in zip(metrics, colors[:len(metrics)]):
+            fig.add_trace(go.Scatter(
+                x=df['Date'], 
+                y=df[metric],
+                name=metric,
+                line=dict(color=color)
+            ))
+        
+        fig.update_layout(title="Engagement Metrics Over Time")
+        st.plotly_chart(fig, use_container_width=True)
+
+    # AI Summary
+    if st.button("Generate AI Insights for Twitter"):
+        summary_text = "Twitter Performance Summary:\n"
+        summary_text += f"- Total Tweets: {len(df)}\n"
+        if 'engagement_rate' in df.columns:
+            summary_text += f"- Average Engagement Rate: {mean_engagement_rate:.2%}\n"
+        if 'Likes' in df.columns:
+            summary_text += f"- Average Likes: {df['Likes'].mean():,.0f}\n"
+        
+        summary = generate_summary(summary_text, "Twitter")
+        if summary:
+            st.subheader("AI-Powered Insights")
+            st.markdown(summary)
 
 ## --------------------------
 ## COMPARISON FUNCTIONS
@@ -252,51 +298,45 @@ def compare_twitter_accounts(df1, df2, account1_name, account2_name):
     st.header("Twitter Account Comparison")
     
     # Engagement comparison
-    metrics = ['Likes', 'Reposts', 'Replies', 'Bookmarks', 'Impressions']
-    comparison = pd.DataFrame({
-        'Metric': metrics,
-        account1_name: [df1[m].mean() for m in metrics],
-        account2_name: [df2[m].mean() for m in metrics]
-    })
+    metrics = []
+    for metric in ['Likes', 'Reposts', 'Replies', 'Bookmarks', 'Impressions']:
+        if metric in df1.columns and metric in df2.columns:
+            metrics.append(metric)
     
-    fig = px.bar(comparison, x='Metric', y=[account1_name, account2_name],
-                barmode='group', title='Engagement Comparison')
-    st.plotly_chart(fig, use_container_width=True)
+    if metrics:
+        comparison = pd.DataFrame({
+            'Metric': metrics,
+            account1_name: [df1[m].mean() for m in metrics],
+            account2_name: [df2[m].mean() for m in metrics]
+        })
+        
+        fig = px.bar(comparison, x='Metric', y=[account1_name, account2_name],
+                    barmode='group', title='Engagement Comparison')
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No common metrics available for comparison")
 
 def compare_instagram_accounts(df1, df2, account1_name, account2_name):
     st.header("Instagram Account Comparison")
     
     # Performance comparison
-    metrics = ['Reach', 'Engagement', 'Engagement Rate']
-    comparison = pd.DataFrame({
-        'Metric': metrics,
-        account1_name: [df1[m].mean() for m in metrics],
-        account2_name: [df2[m].mean() for m in metrics]
-    })
+    metrics = []
+    for metric in ['Reach', 'Engagement', 'Engagement Rate']:
+        if metric in df1.columns and metric in df2.columns:
+            metrics.append(metric)
     
-    fig = px.bar(comparison, x='Metric', y=[account1_name, account2_name],
-                barmode='group', title='Performance Comparison')
-    st.plotly_chart(fig, use_container_width=True)
-
-## --------------------------
-## CAMPAIGN ANALYSIS FUNCTIONS
-## --------------------------
-
-def analyze_paid_vs_organic(df, platform):
-    if 'campaign_type' not in df.columns:
-        st.warning("No campaign type data available")
-        return
-    
-    st.subheader("Paid vs Organic Performance")
-    
-    metrics = df.groupby('campaign_type').agg({
-        'Reach': 'mean',
-        'Engagement Rate': 'mean'
-    }).reset_index()
-    
-    fig = px.bar(metrics, x='campaign_type', y=['Reach', 'Engagement Rate'],
-                barmode='group', title='Performance by Campaign Type')
-    st.plotly_chart(fig, use_container_width=True)
+    if metrics:
+        comparison = pd.DataFrame({
+            'Metric': metrics,
+            account1_name: [df1[m].mean() for m in metrics],
+            account2_name: [df2[m].mean() for m in metrics]
+        })
+        
+        fig = px.bar(comparison, x='Metric', y=[account1_name, account2_name],
+                    barmode='group', title='Performance Comparison')
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.warning("No common metrics available for comparison")
 
 ## --------------------------
 ## MAIN APP LAYOUT
@@ -317,20 +357,18 @@ def main_app():
                 platform = st.selectbox("Platform", ["twitter", "instagram"])
                 username = st.text_input("Username")
                 display_name = st.text_input("Display Name")
-                campaign_type = st.selectbox("Campaign Type", ["organic", "paid"])
                 
                 if st.form_submit_button("Save Account"):
                     supabase.table("social_accounts").insert({
                         "user_id": user_id,
                         "platform": platform,
                         "username": username,
-                        "display_name": display_name,
-                        "campaign_type": campaign_type
+                        "display_name": display_name
                     }).execute()
                     st.success("Account added!")
                     st.rerun()
     
-    tab1, tab2, tab3 = st.tabs(["Upload & Analyze", "Compare Accounts", "Campaign Insights"])
+    tab1, tab2 = st.tabs(["Upload & Analyze", "Compare Accounts"])
     
     with tab1:
         st.header("Upload Analytics Data")
@@ -341,12 +379,11 @@ def main_app():
                                  format_func=lambda x: f"{x['display_name']} ({x['platform']})")
             data_type = st.selectbox("Data Type", 
                                    ["twitter_tweets", "instagram_posts", "instagram_stories"])
-            campaign_type = st.selectbox("Campaign Type", ["organic", "paid"])
             uploaded_file = st.file_uploader("Upload CSV/Excel", type=["csv", "xlsx"])
             
             if uploaded_file and st.button("Upload & Analyze"):
                 with st.spinner("Processing..."):
-                    if save_uploaded_file(user_id, account["id"], data_type, uploaded_file, campaign_type):
+                    if save_uploaded_file(user_id, account["id"], data_type, uploaded_file):
                         st.success("File uploaded successfully!")
                         df = get_upload_data(f"{user_id}/{account['id']}/{uploaded_file.name}")
                         
@@ -358,8 +395,6 @@ def main_app():
                                 instagram_posts_analysis(df)
                             elif data_type == "instagram_stories":
                                 instagram_stories_analysis(df)
-                            
-                            analyze_paid_vs_organic(df, account["platform"])
     
     with tab2:
         st.header("Compare Accounts")
@@ -395,31 +430,17 @@ def main_app():
                                 compare_twitter_accounts(df1, df2, account1["display_name"], account2["display_name"])
                             else:
                                 compare_instagram_accounts(df1, df2, account1["display_name"], account2["display_name"])
-    
-    with tab3:
-        st.header("Campaign Insights")
-        accounts = get_user_accounts(user_id)
-        
-        if accounts:
-            account = st.selectbox("Select Account for Campaign Analysis", accounts,
-                                 format_func=lambda x: f"{x['display_name']} ({x['platform']})",
-                                 key="campaign_account")
-            
-            uploads = get_account_uploads(user_id, account["id"])
-            if uploads:
-                upload = st.selectbox("Select Data Set", uploads,
-                                    format_func=lambda x: x["file_name"],
-                                    key="campaign_upload")
-                
-                df = get_upload_data(upload["file_path"])
-                if df is not None:
-                    analyze_paid_vs_organic(df, account["platform"])
 
 ## --------------------------
 ## APP ENTRY POINT
 ## --------------------------
 
 def app():
+    st.set_page_config(
+        page_title="Social Media Analytics",
+        page_icon="📊",
+        layout="wide"
+    )
     
     if not check_auth():
         show_auth()
