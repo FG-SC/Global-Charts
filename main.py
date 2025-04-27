@@ -221,24 +221,28 @@ def process_instagram_story_data(df: pd.DataFrame) -> pd.DataFrame:
 ## --------------------------
 ## DATA MANAGEMENT FUNCTIONS
 ## --------------------------
-
 def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> Dict:
     try:
-        # First validate the bucket exists
-        try:
-            supabase.storage.get_bucket("analytics-uploads")
-        except Exception as e:
-            if "Bucket not found" in str(e):
-                supabase.storage.create_bucket("analytics-uploads", public=True)
+        # Verify file size
+        file.seek(0, os.SEEK_END)
+        file_size = file.tell()
+        file.seek(0)
         
-        file_ext = os.path.splitext(file.name)[1]
+        if file_size > 5 * 1024 * 1024:  # 5MB limit
+            return {"success": False, "message": "File size exceeds 5MB limit"}
+            
+        file_ext = os.path.splitext(file.name)[1].lower()
+        if file_ext not in ['.csv', '.xlsx']:
+            return {"success": False, "message": "Only CSV or Excel files allowed"}
+            
         file_name = f"{user_id}/{account_id}/{uuid.uuid4()}{file_ext}"
         
-        # Read file content
-        file_content = file.getvalue()
-        
-        # Upload to Supabase Storage
-        res = supabase.storage.from_("analytics-uploads").upload(file_name, file_content)
+        # Upload to Supabase
+        res = supabase.storage.from_("analytics-uploads").upload(
+            file_name, 
+            file.read(),
+            content_type='text/csv' if file_ext == '.csv' else 'application/vnd.ms-excel'
+        )
         
         if res:
             # Save metadata to database
