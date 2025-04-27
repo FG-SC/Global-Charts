@@ -9,7 +9,7 @@ from typing import Optional, Dict, List
 from supabase import create_client, Client
 import openai
 import re
-from io import StringIO
+from io import StringIO, BytesIO
 from textblob import TextBlob
 
 st.set_page_config(
@@ -18,7 +18,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize Supabase client with bucket creation
+# Initialize Supabase client
 @st.cache_resource
 def init_supabase():
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
@@ -26,14 +26,8 @@ def init_supabase():
     
     try:
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        
-        # Test authentication capabilities
-        try:
-            client.auth.get_user()
-        except Exception as auth_error:
-            st.error(f"Auth test failed: {str(auth_error)}")
-            return None
-            
+        # Test connection
+        client.auth.get_user()
         return client
     except Exception as e:
         st.error(f"Supabase initialization failed: {str(e)}")
@@ -42,35 +36,27 @@ def init_supabase():
 supabase = init_supabase()
 if supabase is None:
     st.error("Failed to initialize Supabase client. Check your credentials.")
-    st.stop()  # Prevent the app from running without Supabase
+    st.stop()
 
-supabase = init_supabase()
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
-## --------------------------
-## AUTHENTICATION FUNCTIONS
-## --------------------------
+# --------------------------
+# AUTHENTICATION FUNCTIONS
+# --------------------------
 def login(email: str, password: str) -> bool:
-    if supabase is None:
-        st.error("Supabase client not initialized")
-        return False
-        
     try:
         response = supabase.auth.sign_in_with_password({
             "email": email,
             "password": password
         })
-        
-        if hasattr(response, 'user') and response.user:
+        if response.user:
             st.session_state.user = response
             return True
-            
-        st.error("Login failed - no user returned")
         return False
     except Exception as e:
         st.error(f"Login error: {str(e)}")
         return False
-        
+
 def sign_up(email: str, password: str, full_name: str) -> bool:
     try:
         response = supabase.auth.sign_up({"email": email, "password": password})
@@ -124,10 +110,9 @@ def show_auth():
                     st.success("Account created! Please login.")
                     st.rerun()
 
-## --------------------------
-## FILE VALIDATION FUNCTIONS
-## --------------------------
-
+# --------------------------
+# FILE VALIDATION FUNCTIONS
+# --------------------------
 def validate_twitter_account_overview(df: pd.DataFrame) -> bool:
     required_columns = {'Date', 'Impressions', 'Likes', 'Engagements'}
     return required_columns.issubset(df.columns)
@@ -158,10 +143,9 @@ def detect_file_type(df: pd.DataFrame, platform: str) -> Optional[str]:
             return "instagram_stories"
     return None
 
-## --------------------------
-## DATA PROCESSING FUNCTIONS
-## --------------------------
-
+# --------------------------
+# DATA PROCESSING FUNCTIONS
+# --------------------------
 def process_twitter_account_data(df: pd.DataFrame) -> pd.DataFrame:
     """Process Twitter account overview data"""
     try:
@@ -181,7 +165,6 @@ def process_twitter_post_data(df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values('Date')
         df['tweet_length'] = df['Post text'].apply(lambda x: len(str(x)))
         
-        # Extract mentions and hashtags
         def extract_mentions(text):
             return re.findall(r'@(\w+)', str(text))
         
@@ -204,7 +187,6 @@ def process_instagram_post_data(df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values('Publish time')
         df['Post Length'] = df['Description'].str.len().fillna(0)
         
-        # Calculate engagement
         engagement_columns = ['Likes', 'Shares', 'Comments', 'Saves']
         available_engagement = [col for col in engagement_columns if col in df.columns]
         df['Engagement'] = df[available_engagement].sum(axis=1)
@@ -223,7 +205,6 @@ def process_instagram_story_data(df: pd.DataFrame) -> pd.DataFrame:
         df['Publish time'] = pd.to_datetime(df['Publish time'])
         df = df.sort_values('Publish time')
         
-        # Calculate engagement
         engagement_columns = ['Likes', 'Replies', 'Sticker taps']
         available_engagement = [col for col in engagement_columns if col in df.columns]
         df['Engagement'] = df[available_engagement].sum(axis=1)
@@ -236,47 +217,50 @@ def process_instagram_story_data(df: pd.DataFrame) -> pd.DataFrame:
         st.error(f"Error processing Instagram story data: {str(e)}")
         return df
 
-## --------------------------
-## DATA MANAGEMENT FUNCTIONS
-## --------------------------
+# --------------------------
+# DATA MANAGEMENT FUNCTIONS
+# --------------------------
 def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> Dict:
     try:
-        # Verify file size
-        file.seek(0, os.SEEK_END)
-        file_size = file.tell()
-        file.seek(0)
+        # Read file content once
+        file_content = file.read()
+        file.seek(0)  # Reset pointer for validation
         
-        if file_size > 5 * 1024 * 1024:  # 5MB limit
-            return {"success": False, "message": "File size exceeds 5MB limit"}
-            
+        # Validate file
         file_ext = os.path.splitext(file.name)[1].lower()
         if file_ext not in ['.csv', '.xlsx']:
-            return {"success": False, "message": "Only CSV or Excel files allowed"}
-            
-        file_name = f"{user_id}/{account_id}/{uuid.uuid4()}{file_ext}"
+            return {"success": False, "message": "Only CSV/Excel files allowed"}
+        if len(file_content) > 5 * 1024 * 1024:
+            return {"success": False, "message": "File exceeds 5MB limit"}
+
+        # Generate unique path
+        file_path = f"{user_id}/{account_id}/{uuid.uuid4()}{file_ext}"
         
-        # Upload to Supabase - Modified version without content_type
-        res = supabase.storage.from_("analytics-uploads").upload(
-            file_name, 
-            file.read()
-        )
+        # Upload to storage
+        res = supabase.storage.from_("analytics-uploads").upload(file_path, file_content)
+        if not res:
+            return {"success": False, "message": "Upload failed"}
         
-        if res:
-            # Save metadata to database
-            response = supabase.table("analytics_uploads").insert({
-                "user_id": user_id,
-                "account_id": account_id,
-                "data_type": data_type,
-                "file_name": file.name,
-                "file_path": file_name
-            }).execute()
+        # Save metadata
+        response = supabase.table("analytics_uploads").insert({
+            "user_id": user_id,
+            "account_id": account_id,
+            "data_type": data_type,
+            "file_name": file.name,
+            "file_path": file_path
+        }).execute()
+        
+        if not response.data:
+            return {"success": False, "message": "Metadata save failed"}
             
-            if response.data:
-                return {"success": True, "message": "File uploaded successfully!"}
-            return {"success": False, "message": "Failed to save file metadata"}
-        return {"success": False, "message": "Failed to upload file to storage"}
+        return {
+            "success": True,
+            "message": "File uploaded successfully!",
+            "file_path": file_path
+        }
     except Exception as e:
-        return {"success": False, "message": f"Error saving file: {str(e)}"}
+        return {"success": False, "message": f"Error: {str(e)}"}
+
 def get_user_accounts(user_id: str) -> List[Dict]:
     try:
         return supabase.table("social_accounts").select("*").eq("user_id", user_id).execute().data
@@ -290,42 +274,40 @@ def get_account_uploads(user_id: str, account_id: int) -> List[Dict]:
     except Exception as e:
         st.error(f"Error loading uploads: {str(e)}")
         return []
+
 def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
     try:
-        # Add bucket name explicitly
-        res = supabase.storage.from_("analytics-uploads").download(file_path)
-        
-        # Handle both CSV and JSON
-        if file_path.endswith('.csv'):
-            return pd.read_csv(StringIO(res.decode('utf-8')))
-        elif file_path.endswith('.json'):
-            return pd.read_json(StringIO(res.decode('utf-8')))
-        else:
-            st.error("Unsupported file format")
+        if not file_path:
+            st.error("No file path provided")
             return None
             
+        # Download file
+        res = supabase.storage.from_("analytics-uploads").download(file_path)
+        if not res:
+            st.error("Empty response from storage")
+            return None
+            
+        # Process file based on extension
+        if file_path.endswith('.csv'):
+            return pd.read_csv(StringIO(res.decode('utf-8')))
+        elif file_path.endswith('.xlsx'):
+            return pd.read_excel(BytesIO(res))
+        else:
+            st.error(f"Unsupported file type: {file_path}")
+            return None
     except Exception as e:
-        st.error(f"Error loading {file_path}: {str(e)}")
+        st.error(f"Error loading file: {str(e)}")
         return None
-## --------------------------
-## ANALYSIS FUNCTIONS
-## --------------------------
 
+# --------------------------
+# ANALYSIS FUNCTIONS
+# --------------------------
 def generate_summary(text: str, platform: str) -> Optional[str]:
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": f"""You are a social media analytics expert. Provide a detailed, insightful summary (500-700 words) analyzing {platform} performance. 
-                Include: 
-                1. Key performance metrics 
-                2. Content type analysis 
-                3. Engagement patterns 
-                4. Optimal posting times 
-                5. Content characteristics of top performers 
-                6. Actionable recommendations
-                7. Sentiment analysis insights
-                Use professional but accessible language."""},
+                {"role": "system", "content": f"""You are a social media analytics expert. Provide a detailed, insightful summary (500-700 words) analyzing {platform} performance."""},
                 {"role": "user", "content": text}
             ],
             temperature=0.7,
@@ -338,11 +320,8 @@ def generate_summary(text: str, platform: str) -> Optional[str]:
 
 def twitter_account_analysis(df: pd.DataFrame):
     st.header("Twitter Account Overview")
-    
-    # Process data
     df = process_twitter_account_data(df)
     
-    # Display metrics
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Days", len(df))
     if 'followers' in df.columns:
@@ -350,28 +329,19 @@ def twitter_account_analysis(df: pd.DataFrame):
     if 'New follows' in df.columns and 'Unfollows' in df.columns:
         col3.metric("Avg. Daily Growth", f"{(df['New follows'] - df['Unfollows']).mean():.1f}")
     
-    # Visualizations
     if 'followers' in df.columns and 'Date' in df.columns:
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df['Date'], y=df['followers'], 
-                       name='Followers', line=dict(color='#1DA1F2')))
-        fig.update_layout(title="Follower Growth Over Time",
-                        xaxis_title="Date", yaxis_title="Followers")
+        fig.add_trace(go.Scatter(x=df['Date'], y=df['followers'], name='Followers', line=dict(color='#1DA1F2')))
+        fig.update_layout(title="Follower Growth Over Time", xaxis_title="Date", yaxis_title="Followers")
         st.plotly_chart(fig, use_container_width=True)
     
-    # Engagement metrics
     fig = go.Figure()
     metrics = ['Impressions', 'Engagements', 'Likes']
     colors = ['#17BF63', '#E0245E', '#FFAD1F']
     
     for metric, color in zip(metrics, colors):
         if metric in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df['Date'], 
-                y=df[metric],
-                name=metric,
-                line=dict(color=color)
-            ))
+            fig.add_trace(go.Scatter(x=df['Date'], y=df[metric], name=metric, line=dict(color=color)))
     
     if len(fig.data) > 0:
         fig.update_layout(title="Engagement Metrics Over Time")
@@ -544,10 +514,9 @@ def compare_instagram_accounts(account1_data: pd.DataFrame, account2_data: pd.Da
     else:
         st.warning("No common metrics available for comparison")
 
-## --------------------------
-## MAIN APP LAYOUT
-## --------------------------
-
+# --------------------------
+# MAIN APP LAYOUT
+# --------------------------
 def main_app():
     st.title("Social Media Analytics Dashboard")
     user = st.session_state.user
@@ -588,52 +557,41 @@ def main_app():
             
             if uploaded_file:
                 try:
-                    # Preview the file
-                    df = pd.read_csv(uploaded_file)
+                    # Preview file
+                    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
                     st.subheader("File Preview")
                     st.dataframe(df.head(3))
                     
-                    # Auto-detect file type
+                    # Detect file type
                     detected_type = detect_file_type(df, account["platform"])
-                    
-                    if detected_type:
-                        st.success(f"Detected file type: {detected_type.replace('_', ' ').title()}")
+                    if not detected_type:
+                        st.error("Could not detect file type")
+                        return
                         
-                        if st.button("Upload & Analyze"):
-                            with st.spinner("Processing..."):
-                                result = save_uploaded_file(user_id, account["id"], detected_type, uploaded_file)
+                    st.success(f"Detected: {detected_type.replace('_', ' ').title()}")
+                    
+                    if st.button("Upload & Analyze"):
+                        with st.spinner("Processing..."):
+                            result = save_uploaded_file(user_id, account["id"], detected_type, uploaded_file)
+                            
+                            if result["success"]:
+                                st.success(result["message"])
+                                df = get_upload_data(result["file_path"])
                                 
-                                if result["success"]:
-                                    st.success(result["message"])
-                                    st.write("File path:", f"{user_id}/{account['id']}/{uploaded_file.name}")  # Debug path
-                                    # Perform analysis based on file type
-                                    df = get_upload_data(f"{user_id}/{account['id']}/{uploaded_file.name}")
-                                    
-                                    if df is not None:
-                                        st.write("Data loaded successfully. Sample:", df.head(2))  # Verify data
-                                        
-                                        st.subheader("Analysis Results")
-                                        if detected_type == "twitter_account_overview":
-                                            twitter_account_analysis(df)
-                                        elif detected_type == "twitter_post_data":
-                                            twitter_post_analysis(df)
-                                        elif detected_type == "instagram_posts":
-                                            instagram_post_analysis(df)
-                                        elif detected_type == "instagram_stories":
-                                            instagram_story_analysis(df)
-                                else:
-                                    st.error(result["message"])
-                    else:
-                        st.error("Could not determine file type. Please check the file format.")
-                        st.markdown("""
-                        **Expected formats:**
-                        - **Twitter Account Overview**: Should contain 'Date', 'Impressions', 'Likes', 'Engagements'
-                        - **Twitter Post Data**: Should contain 'Date', 'Post text', 'Impressions', 'Likes'
-                        - **Instagram Posts**: Should contain 'Publish time', 'Post type', 'Reach', 'Likes'
-                        - **Instagram Stories**: Should contain 'Publish time', 'Reach', 'Likes', 'Replies'
-                        """)
+                                if df is not None:
+                                    st.subheader("Analysis Results")
+                                    if detected_type == "twitter_account_overview":
+                                        twitter_account_analysis(df)
+                                    elif detected_type == "twitter_post_data":
+                                        twitter_post_analysis(df)
+                                    elif detected_type == "instagram_posts":
+                                        instagram_post_analysis(df)
+                                    elif detected_type == "instagram_stories":
+                                        instagram_story_analysis(df)
+                            else:
+                                st.error(result["message"])
                 except Exception as e:
-                    st.error(f"Error reading file: {str(e)}")
+                    st.error(f"Error: {str(e)}")
     
     with tab2:
         st.header("Compare Accounts")
@@ -655,7 +613,6 @@ def main_app():
                 uploads2 = get_account_uploads(user_id, account2["id"])
                 
                 if uploads1 and uploads2:
-                    # For comparison, we'll use account overview data for Twitter and post data for Instagram
                     if account1["platform"] == "twitter":
                         st.info("For Twitter comparison, please select account overview data")
                         upload1_options = [u for u in uploads1 if u["data_type"] == "twitter_account_overview"]
@@ -666,14 +623,8 @@ def main_app():
                         upload2_options = [u for u in uploads2 if u["data_type"] == "instagram_posts"]
                     
                     if upload1_options and upload2_options:
-                        upload1 = st.selectbox("First Data Set", 
-                                             upload1_options,
-                                             format_func=lambda x: x["file_name"], 
-                                             key="upload1")
-                        upload2 = st.selectbox("Second Data Set", 
-                                             upload2_options,
-                                             format_func=lambda x: x["file_name"], 
-                                             key="upload2")
+                        upload1 = st.selectbox("First Data Set", upload1_options, format_func=lambda x: x["file_name"], key="upload1")
+                        upload2 = st.selectbox("Second Data Set", upload2_options, format_func=lambda x: x["file_name"], key="upload2")
                         
                         if st.button("Compare"):
                             df1 = get_upload_data(upload1["file_path"])
@@ -681,28 +632,16 @@ def main_app():
                             
                             if df1 is not None and df2 is not None:
                                 if account1["platform"] == "twitter":
-                                    compare_twitter_accounts(
-                                        df1, 
-                                        df2,
-                                        account1["display_name"], 
-                                        account2["display_name"]
-                                    )
+                                    compare_twitter_accounts(df1, df2, account1["display_name"], account2["display_name"])
                                 else:
-                                    compare_instagram_accounts(
-                                        df1,
-                                        df2,
-                                        account1["display_name"], 
-                                        account2["display_name"]
-                                    )
+                                    compare_instagram_accounts(df1, df2, account1["display_name"], account2["display_name"])
                     else:
                         st.warning("No compatible files found for comparison")
 
-## --------------------------
-## APP ENTRY POINT
-## --------------------------
-
+# --------------------------
+# APP ENTRY POINT
+# --------------------------
 def app():
-    
     if not check_auth():
         show_auth()
     else:
