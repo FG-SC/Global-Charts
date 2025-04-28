@@ -11,12 +11,10 @@ import openai
 import re
 from io import StringIO, BytesIO
 from textblob import TextBlob
+from datetime import timedelta
 
-st.set_page_config(
-    page_title="Social Media Analytics",
-    page_icon="📊",
-    layout="wide"
-)
+# Constants
+SESSION_TIMEOUT_MINUTES = 30  # Session will expire after 30 minutes of inactivity
 
 # Initialize Supabase client
 @st.cache_resource
@@ -41,16 +39,77 @@ if supabase is None:
 openai.api_key = st.secrets["OPENAI_API_KEY"]
 
 # --------------------------
+# SECURITY FUNCTIONS
+# --------------------------
+def generate_csrf_token():
+    return str(uuid.uuid4())
+
+def validate_csrf_token(token: str) -> bool:
+    if "csrf_token" not in st.session_state:
+        return False
+    return st.session_state.csrf_token == token
+
+def check_session_timeout():
+    """Check if session has timed out due to inactivity"""
+    if "last_activity" not in st.session_state:
+        return True
+    
+    elapsed = datetime.now() - st.session_state.last_activity
+    return elapsed > timedelta(minutes=SESSION_TIMEOUT_MINUTES)
+
+def update_last_activity():
+    """Update the last activity timestamp"""
+    st.session_state.last_activity = datetime.now()
+
+def get_client_ip():
+    """Get client IP address for logging"""
+    try:
+        from streamlit.web.server.websocket_headers import _get_websocket_headers
+        headers = _get_websocket_headers()
+        if headers:
+            return headers.get("X-Forwarded-For", "unknown")
+    except:
+        pass
+    return "unknown"
+
+# --------------------------
 # AUTHENTICATION FUNCTIONS
 # --------------------------
 def login(email: str, password: str) -> bool:
     try:
+        # Rate limiting check
+        if "login_attempts" not in st.session_state:
+            st.session_state.login_attempts = 0
+            st.session_state.last_attempt = datetime.now()
+        
+        if st.session_state.login_attempts >= 5:
+            elapsed = datetime.now() - st.session_state.last_attempt
+            if elapsed < timedelta(minutes=5):
+                st.error("Too many login attempts. Please try again later.")
+                return False
+        
+        st.session_state.login_attempts += 1
+        st.session_state.last_attempt = datetime.now()
+        
         response = supabase.auth.sign_in_with_password({
             "email": email,
             "password": password
         })
+        
         if response.user:
+            # Successful login - reset attempts
+            st.session_state.login_attempts = 0
             st.session_state.user = response
+            update_last_activity()
+            
+            # Log the login
+            supabase.table('audit_logs').insert({
+                "user_id": response.user.id,
+                "action": "login",
+                "ip_address": get_client_ip(),
+                "timestamp": datetime.now().isoformat()
+            }).execute()
+            
             return True
         return False
     except Exception as e:
@@ -59,13 +118,29 @@ def login(email: str, password: str) -> bool:
 
 def sign_up(email: str, password: str, full_name: str) -> bool:
     try:
+        # Input validation
+        if len(password) < 8:
+            st.error("Password must be at least 8 characters")
+            return False
+            
         response = supabase.auth.sign_up({"email": email, "password": password})
         if response.user:
+            # Create user profile
             supabase.table("profiles").insert({
                 "id": response.user.id,
                 "email": email,
-                "full_name": full_name
+                "full_name": full_name,
+                "created_at": datetime.now().isoformat()
             }).execute()
+            
+            # Log the signup
+            supabase.table('audit_logs').insert({
+                "user_id": response.user.id,
+                "action": "signup",
+                "ip_address": get_client_ip(),
+                "timestamp": datetime.now().isoformat()
+            }).execute()
+            
             return True
         return False
     except Exception as e:
@@ -73,29 +148,71 @@ def sign_up(email: str, password: str, full_name: str) -> bool:
         return False
 
 def logout():
-    supabase.auth.sign_out()
-    st.session_state.clear()
-    st.rerun()
+    try:
+        if "user" in st.session_state:
+            # Log the logout
+            supabase.table('audit_logs').insert({
+                "user_id": st.session_state.user.user.id,
+                "action": "logout",
+                "ip_address": get_client_ip(),
+                "timestamp": datetime.now().isoformat()
+            }).execute()
+            
+            supabase.auth.sign_out()
+        st.session_state.clear()
+        st.rerun()
+    except Exception as e:
+        st.error(f"Logout error: {str(e)}")
+        st.session_state.clear()
+        st.rerun()
 
 def check_auth() -> bool:
-    if "user" not in st.session_state:
-        try:
-            user = supabase.auth.get_user()
-            if user:
-                st.session_state.user = user
-                return True
-        except:
-            pass
+    # Check for session timeout
+    if "user" in st.session_state and check_session_timeout():
+        st.warning("Your session has timed out due to inactivity. Please log in again.")
+        logout()
         return False
-    return True
+    
+    # First check if we have a user in session state
+    if "user" in st.session_state:
+        try:
+            # Verify the session is still valid with Supabase
+            current_user = supabase.auth.get_user()
+            if current_user and current_user.user.id == st.session_state.user.user.id:
+                update_last_activity()
+                return True
+            # If IDs don't match, clear session
+            st.session_state.clear()
+            return False
+        except Exception as e:
+            st.session_state.clear()
+            return False
+    
+    # If no user in session state, try to get from Supabase
+    try:
+        current_user = supabase.auth.get_user()
+        if current_user:
+            st.session_state.user = current_user
+            update_last_activity()
+            return True
+    except:
+        pass
+    
+    return False
 
 def show_auth():
+    # Initialize CSRF token if not exists
+    if "csrf_token" not in st.session_state:
+        st.session_state.csrf_token = generate_csrf_token()
+    
     tab1, tab2 = st.tabs(["Login", "Sign Up"])
     
     with tab1:
         with st.form("login_form"):
             email = st.text_input("Email", key="login_email")
             password = st.text_input("Password", type="password", key="login_password")
+            csrf_token = st.session_state.csrf_token
+            
             if st.form_submit_button("Login"):
                 if login(email, password):
                     st.rerun()
@@ -105,6 +222,8 @@ def show_auth():
             email = st.text_input("Email", key="signup_email")
             password = st.text_input("Password", type="password", key="signup_password")
             full_name = st.text_input("Full Name", key="signup_name")
+            csrf_token = st.session_state.csrf_token
+            
             if st.form_submit_button("Create Account"):
                 if sign_up(email, password, full_name):
                     st.success("Account created! Please login.")
@@ -112,6 +231,7 @@ def show_auth():
 
 # --------------------------
 # FILE VALIDATION FUNCTIONS
+# (No changes needed here)
 # --------------------------
 def validate_twitter_account_overview(df: pd.DataFrame) -> bool:
     required_columns = {'Date', 'Impressions', 'Likes', 'Engagements'}
@@ -145,6 +265,7 @@ def detect_file_type(df: pd.DataFrame, platform: str) -> Optional[str]:
 
 # --------------------------
 # DATA PROCESSING FUNCTIONS
+# (No changes needed here)
 # --------------------------
 def process_twitter_account_data(df: pd.DataFrame) -> pd.DataFrame:
     """Process Twitter account overview data"""
@@ -222,6 +343,11 @@ def process_instagram_story_data(df: pd.DataFrame) -> pd.DataFrame:
 # --------------------------
 def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> Dict:
     try:
+        # Verify ownership before upload
+        account = supabase.table("social_accounts").select("*").eq("id", account_id).eq("user_id", user_id).execute()
+        if not account.data:
+            return {"success": False, "message": "Account not found or access denied"}
+        
         # Read file content
         file_content = file.getvalue() if hasattr(file, 'getvalue') else file.read()
         file_ext = os.path.splitext(file.name)[1].lower()
@@ -239,7 +365,6 @@ def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> D
         
         # Verify upload
         try:
-            # This is the critical fix - list files with the exact path prefix
             existing_files = supabase.storage.from_("analytics-uploads").list(f"{user_id}/{account_id}")
             if not any(f['name'] == file_path.split('/')[-1] for f in existing_files):
                 return {"success": False, "message": "File verification failed after upload"}
@@ -252,7 +377,17 @@ def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> D
             "account_id": account_id,
             "data_type": data_type,
             "file_name": file.name,
-            "file_path": file_path
+            "file_path": file_path,
+            "uploaded_at": datetime.now().isoformat()
+        }).execute()
+        
+        # Log the upload
+        supabase.table('audit_logs').insert({
+            "user_id": user_id,
+            "action": "file_upload",
+            "details": f"Uploaded {file.name} for account {account_id}",
+            "ip_address": get_client_ip(),
+            "timestamp": datetime.now().isoformat()
         }).execute()
         
         return {
@@ -262,8 +397,6 @@ def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> D
         }
     except Exception as e:
         return {"success": False, "message": f"Error: {str(e)}"}
-
-
 
 def get_user_accounts(user_id: str) -> List[Dict]:
     try:
@@ -283,6 +416,11 @@ def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
     try:
         if not file_path:
             st.error("No file path provided")
+            return None
+
+        # Verify the file belongs to the current user
+        if "user" not in st.session_state or not file_path.startswith(st.session_state.user.user.id):
+            st.error("Access denied")
             return None
 
         # Split path to match Supabase storage structure
@@ -335,7 +473,7 @@ def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
     except Exception as e:
         st.error(f"Unexpected error: {str(e)}")
         return None
-        
+
 # --------------------------
 # ANALYSIS FUNCTIONS
 # --------------------------
@@ -556,11 +694,22 @@ def compare_instagram_accounts(account1_data: pd.DataFrame, account2_data: pd.Da
 # --------------------------
 def main_app():
     st.title("Social Media Analytics Dashboard")
+    
+    # Verify authentication and session
+    if not check_auth():
+        show_auth()
+        return
+    
     user = st.session_state.user
     user_id = user.user.id
     
     with st.sidebar:
-        st.header(f"Welcome, {user.user.email}")
+        st.header(f"Welcome, {user.user.email.split('@')[0]}")
+        
+        # Session info
+        time_left = SESSION_TIMEOUT_MINUTES - (datetime.now() - st.session_state.last_activity).seconds // 60
+        st.caption(f"Session expires in {time_left} minutes")
+        
         if st.button("Logout"):
             logout()
         
@@ -569,14 +718,26 @@ def main_app():
                 platform = st.selectbox("Platform", ["twitter", "instagram"])
                 username = st.text_input("Username")
                 display_name = st.text_input("Display Name")
+                csrf_token = st.session_state.csrf_token
                 
                 if st.form_submit_button("Save Account"):
                     supabase.table("social_accounts").insert({
                         "user_id": user_id,
                         "platform": platform,
                         "username": username,
-                        "display_name": display_name
+                        "display_name": display_name,
+                        "created_at": datetime.now().isoformat()
                     }).execute()
+                    
+                    # Log the account creation
+                    supabase.table('audit_logs').insert({
+                        "user_id": user_id,
+                        "action": "account_created",
+                        "details": f"Added {platform} account {username}",
+                        "ip_address": get_client_ip(),
+                        "timestamp": datetime.now().isoformat()
+                    }).execute()
+                    
                     st.success("Account added!")
                     st.rerun()
     
@@ -686,50 +847,21 @@ def main_app():
                                     compare_instagram_accounts(df1, df2, account1["display_name"], account2["display_name"])
                     else:
                         st.warning("No compatible files found for comparison")
-                        
-def debug_storage():
-    """Enhanced debug function"""
-    try:
-        st.subheader("Storage Debug Information")
-        user_id = st.session_state.user.user.id
-        
-        # List all user files
-        files = supabase.storage.from_("analytics-uploads").list(user_id)
-        st.write("User files in storage:", files)
-        
-        # Show metadata from database
-        uploads = supabase.table("analytics_uploads").select("*").eq("user_id", user_id).execute()
-        st.write("Database records:", uploads.data)
-        
-        # Test download for each file
-        for upload in uploads.data:
-            try:
-                st.write(f"\nTesting download for: {upload['file_path']}")
-                res = supabase.storage.from_("analytics-uploads").download(upload['file_path'])
-                st.write(f"Downloaded {len(res) if res else 0} bytes")
-                if res:
-                    try:
-                        if upload['file_path'].endswith('.csv'):
-                            df = pd.read_csv(StringIO(res.decode('utf-8')))
-                        else:
-                            df = pd.read_excel(BytesIO(res))
-                        st.write("First row:", df.iloc[0])
-                    except Exception as parse_error:
-                        st.error(f"Parse error: {str(parse_error)}")
-            except Exception as download_error:
-                st.error(f"Download error: {str(download_error)}")
-                
-    except Exception as e:
-        st.error(f"Debug error: {str(e)}")
 
-# Add this to your sidebar for debugging:
-with st.sidebar:
-    if st.checkbox("Show debug info"):
-        debug_storage()
 # --------------------------
 # APP ENTRY POINT
 # --------------------------
 def app():
+    # Initialize session state if needed
+    if "csrf_token" not in st.session_state:
+        st.session_state.csrf_token = generate_csrf_token()
+    
+    st.set_page_config(
+        page_title="Social Media Analytics",
+        page_icon="📊",
+        layout="wide"
+    )
+    
     if not check_auth():
         show_auth()
     else:
@@ -737,3 +869,4 @@ def app():
 
 if __name__ == "__main__":
     app()
+    
