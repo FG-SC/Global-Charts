@@ -222,39 +222,27 @@ def process_instagram_story_data(df: pd.DataFrame) -> pd.DataFrame:
 # --------------------------
 def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> Dict:
     try:
-        # Read and validate file first
+        # Read file content
         file_content = file.getvalue() if hasattr(file, 'getvalue') else file.read()
         file_ext = os.path.splitext(file.name)[1].lower()
         
-        if len(file_content) > 5 * 1024 * 1024:
-            return {"success": False, "message": "File exceeds 5MB limit"}
-        if file_ext not in ['.csv', '.xlsx']:
-            return {"success": False, "message": "Only CSV/Excel files allowed"}
-
-        # Generate storage path
+        # Generate storage path with proper structure
         file_path = f"{user_id}/{account_id}/{uuid.uuid4()}{file_ext}"
         
-        # Debug output
-        st.write(f"Attempting to upload to: {file_path}")
+        # Upload with explicit content type
+        content_type = "text/csv" if file_ext == '.csv' else "application/vnd.ms-excel"
+        res = supabase.storage.from_("analytics-uploads").upload(
+            file_path,
+            file_content,
+            {"content-type": content_type}
+        )
         
-        # Upload to storage (with explicit error checking)
+        # Verify upload
         try:
-            res = supabase.storage.from_("analytics-uploads").upload(
-                file_path, 
-                file_content,
-                {"content-type": "text/csv" if file_ext == '.csv' else "application/vnd.ms-excel"}
-            )
-            
-            if isinstance(res, dict) and res.get('error'):
-                return {"success": False, "message": f"Storage error: {res['error']}"}
-        except Exception as upload_error:
-            return {"success": False, "message": f"Upload failed: {str(upload_error)}"}
-
-        # Verify the file exists in storage
-        try:
-            existing_files = supabase.storage.from_("analytics-uploads").list()
-            if not any(f['name'] == file_path for f in existing_files):
-                return {"success": False, "message": "Upload verification failed"}
+            # This is the critical fix - list files with the exact path prefix
+            existing_files = supabase.storage.from_("analytics-uploads").list(f"{user_id}/{account_id}")
+            if not any(f['name'] == file_path.split('/')[-1] for f in existing_files):
+                return {"success": False, "message": "File verification failed after upload"}
         except Exception as verify_error:
             return {"success": False, "message": f"Verification error: {str(verify_error)}"}
 
@@ -267,16 +255,13 @@ def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> D
             "file_path": file_path
         }).execute()
         
-        if not response.data:
-            return {"success": False, "message": "Metadata save failed"}
-            
         return {
             "success": True,
             "message": "File uploaded and verified successfully!",
             "file_path": file_path
         }
     except Exception as e:
-        return {"success": False, "message": f"Unexpected error: {str(e)}"}
+        return {"success": False, "message": f"Error: {str(e)}"}
 
 
 
@@ -300,30 +285,32 @@ def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
             st.error("No file path provided")
             return None
 
-        # First verify the file exists
+        # Split path to match Supabase storage structure
+        path_parts = file_path.split('/')
+        folder_path = '/'.join(path_parts[:2])  # user_id/account_id
+        file_name = path_parts[-1]  # actual filename
+        
+        # List files in the specific folder
         try:
-            file_list = supabase.storage.from_("analytics-uploads").list()
-            if not any(f['name'] == file_path for f in file_list):
-                st.error(f"File not found in storage: {file_path}")
+            existing_files = supabase.storage.from_("analytics-uploads").list(folder_path)
+            if not any(f['name'] == file_name for f in existing_files):
+                st.error(f"File not found in storage: {file_name}")
                 return None
         except Exception as list_error:
             st.error(f"Error listing files: {str(list_error)}")
             return None
 
-        # Download the file content
+        # Download the file
         try:
             res = supabase.storage.from_("analytics-uploads").download(file_path)
             if not res:
                 st.error("Received empty response from storage")
                 return None
                 
-            # Debug the received content
-            st.write(f"Received {len(res)} bytes of data")
-
-            # Handle different file types
+            # Handle file type
             if file_path.endswith('.csv'):
                 try:
-                    # Try UTF-8 first, fall back to other encodings if needed
+                    # Try multiple encodings
                     try:
                         return pd.read_csv(StringIO(res.decode('utf-8')))
                     except UnicodeDecodeError:
@@ -331,7 +318,6 @@ def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
                 except Exception as csv_error:
                     st.error(f"CSV parsing error: {str(csv_error)}")
                     return None
-                    
             elif file_path.endswith('.xlsx'):
                 try:
                     return pd.read_excel(BytesIO(res))
@@ -349,6 +335,7 @@ def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
     except Exception as e:
         st.error(f"Unexpected error: {str(e)}")
         return None
+        
 # --------------------------
 # ANALYSIS FUNCTIONS
 # --------------------------
@@ -701,18 +688,37 @@ def main_app():
                         st.warning("No compatible files found for comparison")
                         
 def debug_storage():
-    """Debug function to check storage contents"""
+    """Enhanced debug function"""
     try:
         st.subheader("Storage Debug Information")
+        user_id = st.session_state.user.user.id
         
-        # List all files in storage
-        files = supabase.storage.from_("analytics-uploads").list()
-        st.write("Files in storage:", files)
+        # List all user files
+        files = supabase.storage.from_("analytics-uploads").list(user_id)
+        st.write("User files in storage:", files)
         
         # Show metadata from database
-        uploads = supabase.table("analytics_uploads").select("*").execute()
+        uploads = supabase.table("analytics_uploads").select("*").eq("user_id", user_id).execute()
         st.write("Database records:", uploads.data)
         
+        # Test download for each file
+        for upload in uploads.data:
+            try:
+                st.write(f"\nTesting download for: {upload['file_path']}")
+                res = supabase.storage.from_("analytics-uploads").download(upload['file_path'])
+                st.write(f"Downloaded {len(res) if res else 0} bytes")
+                if res:
+                    try:
+                        if upload['file_path'].endswith('.csv'):
+                            df = pd.read_csv(StringIO(res.decode('utf-8')))
+                        else:
+                            df = pd.read_excel(BytesIO(res))
+                        st.write("First row:", df.iloc[0])
+                    except Exception as parse_error:
+                        st.error(f"Parse error: {str(parse_error)}")
+            except Exception as download_error:
+                st.error(f"Download error: {str(download_error)}")
+                
     except Exception as e:
         st.error(f"Debug error: {str(e)}")
 
