@@ -222,25 +222,42 @@ def process_instagram_story_data(df: pd.DataFrame) -> pd.DataFrame:
 # --------------------------
 def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> Dict:
     try:
-        # Read file content once
-        file_content = file.read()
-        file.seek(0)  # Reset pointer for validation
-        
-        # Validate file
+        # Read and validate file first
+        file_content = file.getvalue() if hasattr(file, 'getvalue') else file.read()
         file_ext = os.path.splitext(file.name)[1].lower()
-        if file_ext not in ['.csv', '.xlsx']:
-            return {"success": False, "message": "Only CSV/Excel files allowed"}
+        
         if len(file_content) > 5 * 1024 * 1024:
             return {"success": False, "message": "File exceeds 5MB limit"}
+        if file_ext not in ['.csv', '.xlsx']:
+            return {"success": False, "message": "Only CSV/Excel files allowed"}
 
-        # Generate unique path
+        # Generate storage path
         file_path = f"{user_id}/{account_id}/{uuid.uuid4()}{file_ext}"
         
-        # Upload to storage
-        res = supabase.storage.from_("analytics-uploads").upload(file_path, file_content)
-        if not res:
-            return {"success": False, "message": "Upload failed"}
+        # Debug output
+        st.write(f"Attempting to upload to: {file_path}")
         
+        # Upload to storage (with explicit error checking)
+        try:
+            res = supabase.storage.from_("analytics-uploads").upload(
+                file_path, 
+                file_content,
+                {"content-type": "text/csv" if file_ext == '.csv' else "application/vnd.ms-excel"}
+            )
+            
+            if isinstance(res, dict) and res.get('error'):
+                return {"success": False, "message": f"Storage error: {res['error']}"}
+        except Exception as upload_error:
+            return {"success": False, "message": f"Upload failed: {str(upload_error)}"}
+
+        # Verify the file exists in storage
+        try:
+            existing_files = supabase.storage.from_("analytics-uploads").list()
+            if not any(f['name'] == file_path for f in existing_files):
+                return {"success": False, "message": "Upload verification failed"}
+        except Exception as verify_error:
+            return {"success": False, "message": f"Verification error: {str(verify_error)}"}
+
         # Save metadata
         response = supabase.table("analytics_uploads").insert({
             "user_id": user_id,
@@ -255,11 +272,13 @@ def save_uploaded_file(user_id: str, account_id: int, data_type: str, file) -> D
             
         return {
             "success": True,
-            "message": "File uploaded successfully!",
+            "message": "File uploaded and verified successfully!",
             "file_path": file_path
         }
     except Exception as e:
-        return {"success": False, "message": f"Error: {str(e)}"}
+        return {"success": False, "message": f"Unexpected error: {str(e)}"}
+
+
 
 def get_user_accounts(user_id: str) -> List[Dict]:
     try:
@@ -275,28 +294,50 @@ def get_account_uploads(user_id: str, account_id: int) -> List[Dict]:
         st.error(f"Error loading uploads: {str(e)}")
         return []
 
+
 def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
     try:
         if not file_path:
             st.error("No file path provided")
             return None
             
-        # Download file
+        # Debug output
+        st.write(f"Attempting to download: {file_path}")
+        
+        # First verify file exists
+        try:
+            existing_files = supabase.storage.from_("analytics-uploads").list()
+            if not any(f['name'] == file_path for f in existing_files):
+                st.error(f"File not found in storage: {file_path}")
+                return None
+        except Exception as list_error:
+            st.error(f"Storage listing error: {str(list_error)}")
+            return None
+        
+        # Download file content
         res = supabase.storage.from_("analytics-uploads").download(file_path)
         if not res:
-            st.error("Empty response from storage")
+            st.error("Received empty response from storage")
             return None
             
-        # Process file based on extension
-        if file_path.endswith('.csv'):
-            return pd.read_csv(StringIO(res.decode('utf-8')))
-        elif file_path.endswith('.xlsx'):
-            return pd.read_excel(BytesIO(res))
-        else:
-            st.error(f"Unsupported file type: {file_path}")
+        # Debug file content
+        st.write(f"Received file content length: {len(res) if res else 0}")
+        
+        # Process based on file type
+        try:
+            if file_path.endswith('.csv'):
+                return pd.read_csv(StringIO(res.decode('utf-8')))
+            elif file_path.endswith('.xlsx'):
+                return pd.read_excel(BytesIO(res))
+            else:
+                st.error(f"Unsupported file type: {file_path}")
+                return None
+        except Exception as parse_error:
+            st.error(f"File parsing error: {str(parse_error)}")
             return None
+            
     except Exception as e:
-        st.error(f"Error loading file: {str(e)}")
+        st.error(f"Download error: {str(e)}")
         return None
 
 # --------------------------
