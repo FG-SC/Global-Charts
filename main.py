@@ -294,52 +294,61 @@ def get_account_uploads(user_id: str, account_id: int) -> List[Dict]:
         st.error(f"Error loading uploads: {str(e)}")
         return []
 
-
 def get_upload_data(file_path: str) -> Optional[pd.DataFrame]:
     try:
         if not file_path:
             st.error("No file path provided")
             return None
-            
-        # Debug output
-        st.write(f"Attempting to download: {file_path}")
-        
-        # First verify file exists
+
+        # First verify the file exists
         try:
-            existing_files = supabase.storage.from_("analytics-uploads").list()
-            if not any(f['name'] == file_path for f in existing_files):
+            file_list = supabase.storage.from_("analytics-uploads").list()
+            if not any(f['name'] == file_path for f in file_list):
                 st.error(f"File not found in storage: {file_path}")
                 return None
         except Exception as list_error:
-            st.error(f"Storage listing error: {str(list_error)}")
+            st.error(f"Error listing files: {str(list_error)}")
             return None
-        
-        # Download file content
-        res = supabase.storage.from_("analytics-uploads").download(file_path)
-        if not res:
-            st.error("Received empty response from storage")
-            return None
-            
-        # Debug file content
-        st.write(f"Received file content length: {len(res) if res else 0}")
-        
-        # Process based on file type
+
+        # Download the file content
         try:
+            res = supabase.storage.from_("analytics-uploads").download(file_path)
+            if not res:
+                st.error("Received empty response from storage")
+                return None
+                
+            # Debug the received content
+            st.write(f"Received {len(res)} bytes of data")
+
+            # Handle different file types
             if file_path.endswith('.csv'):
-                return pd.read_csv(StringIO(res.decode('utf-8')))
+                try:
+                    # Try UTF-8 first, fall back to other encodings if needed
+                    try:
+                        return pd.read_csv(StringIO(res.decode('utf-8')))
+                    except UnicodeDecodeError:
+                        return pd.read_csv(StringIO(res.decode('latin-1')))
+                except Exception as csv_error:
+                    st.error(f"CSV parsing error: {str(csv_error)}")
+                    return None
+                    
             elif file_path.endswith('.xlsx'):
-                return pd.read_excel(BytesIO(res))
+                try:
+                    return pd.read_excel(BytesIO(res))
+                except Exception as excel_error:
+                    st.error(f"Excel parsing error: {str(excel_error)}")
+                    return None
             else:
                 st.error(f"Unsupported file type: {file_path}")
                 return None
-        except Exception as parse_error:
-            st.error(f"File parsing error: {str(parse_error)}")
+                
+        except Exception as download_error:
+            st.error(f"Download failed: {str(download_error)}")
             return None
             
     except Exception as e:
-        st.error(f"Download error: {str(e)}")
+        st.error(f"Unexpected error: {str(e)}")
         return None
-
 # --------------------------
 # ANALYSIS FUNCTIONS
 # --------------------------
@@ -599,10 +608,17 @@ def main_app():
             if uploaded_file:
                 try:
                     # Preview file
-                    df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
-                    st.subheader("File Preview")
-                    st.dataframe(df.head(3))
-                    
+                    try:
+                        if uploaded_file.name.endswith('.csv'):
+                            df = pd.read_csv(uploaded_file)
+                        else:  # Excel
+                            df = pd.read_excel(uploaded_file)
+                        st.subheader("File Preview")
+                        st.dataframe(df.head(3))
+                    except Exception as preview_error:
+                        st.error(f"Preview error: {str(preview_error)}")
+                        return
+                        
                     # Detect file type
                     detected_type = detect_file_type(df, account["platform"])
                     if not detected_type:
@@ -613,14 +629,19 @@ def main_app():
                     
                     if st.button("Upload & Analyze"):
                         with st.spinner("Processing..."):
+                            # Upload the file
                             result = save_uploaded_file(user_id, account["id"], detected_type, uploaded_file)
                             
                             if result["success"]:
                                 st.success(result["message"])
+                                
+                                # Get the uploaded data using the exact path returned
                                 df = get_upload_data(result["file_path"])
                                 
                                 if df is not None:
-                                    st.subheader("Analysis Results")
+                                    st.write("Data loaded successfully. First row:", df.iloc[0])
+                                    
+                                    # Perform analysis
                                     if detected_type == "twitter_account_overview":
                                         twitter_account_analysis(df)
                                     elif detected_type == "twitter_post_data":
@@ -633,7 +654,7 @@ def main_app():
                                 st.error(result["message"])
                 except Exception as e:
                     st.error(f"Error: {str(e)}")
-    
+            
     with tab2:
         st.header("Compare Accounts")
         accounts = get_user_accounts(user_id)
@@ -678,7 +699,27 @@ def main_app():
                                     compare_instagram_accounts(df1, df2, account1["display_name"], account2["display_name"])
                     else:
                         st.warning("No compatible files found for comparison")
+                        
+def debug_storage():
+    """Debug function to check storage contents"""
+    try:
+        st.subheader("Storage Debug Information")
+        
+        # List all files in storage
+        files = supabase.storage.from_("analytics-uploads").list()
+        st.write("Files in storage:", files)
+        
+        # Show metadata from database
+        uploads = supabase.table("analytics_uploads").select("*").execute()
+        st.write("Database records:", uploads.data)
+        
+    except Exception as e:
+        st.error(f"Debug error: {str(e)}")
 
+# Add this to your sidebar for debugging:
+with st.sidebar:
+    if st.checkbox("Show debug info"):
+        debug_storage()
 # --------------------------
 # APP ENTRY POINT
 # --------------------------
